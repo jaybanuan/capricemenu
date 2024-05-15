@@ -1,6 +1,7 @@
 using System;
 using System.Reflection.Metadata;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Windows.Forms;
 using static System.Windows.Forms.VisualStyles.VisualStyleElement;
 
@@ -120,18 +121,18 @@ namespace capricemenu
             _notifyIcon.Visible = true;
 
             _keyboardHook = new HotKeyManager();
-            _keyboardHook.KeyPressed += ShowMenu;
-            _keyboardHook.RegisterHotKey(ModifierKeys.Shift | ModifierKeys.Control, Keys.G);
+            _keyboardHook.RegisterHotKey(new HotKeyMenu(ModifierKeys.Shift | ModifierKeys.Control, Keys.G));
+            _keyboardHook.RegisterHotKey(new HotKeyMenu(ModifierKeys.Shift | ModifierKeys.Control, Keys.J));
         }
 
         private void _contextMenuStrip_Opened(object? sender, EventArgs e)
         {
-            MessageBox.Show("Opened", "Opened", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            // MessageBox.Show("Opened", "Opened", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
 
         private void _contextMenuStrip_Closed(object? sender, ToolStripDropDownClosedEventArgs e)
         {
-            MessageBox.Show("Closed", "Closed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            // MessageBox.Show("Closed", "Closed", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
 
         private void menuItem1_Click(object? sender, EventArgs e)
@@ -147,28 +148,77 @@ namespace capricemenu
             }
         }
     }
+    public class HotKeyMenu
+    {
+        private ModifierKeys _modifierKeys;
 
-    /// <summary>
-    /// Represents the window that is used internally to get the messages.
-    /// </summary>
+        private Keys _keys;
+
+        private ContextMenuStrip _contextMenuStrip;
+
+        private ContextMenuStrip CreateContextMenuStrip()
+        {
+            ContextMenuStrip contextMenuStrip = new ContextMenuStrip();
+
+            ToolStripMenuItem item;
+
+            item = new ToolStripMenuItem();
+            item.Text = "hello";
+            item.Click += Click;
+            contextMenuStrip.Items.Add(item);
+
+            item = new ToolStripMenuItem();
+            item.Text = "world!";
+            item.Click += Click;
+            contextMenuStrip.Items.Add(item);
+
+            return contextMenuStrip;
+        }
+
+        public HotKeyMenu(ModifierKeys modifierKeys, Keys keys)
+        {
+            _modifierKeys = modifierKeys;
+            _keys = keys;
+            _contextMenuStrip = CreateContextMenuStrip();
+        }
+
+        public ModifierKeys ModifierKeys
+        {
+            get { return _modifierKeys; }
+        }
+
+        public Keys Keys
+        {
+            get { return _keys; }
+        }
+
+        public ContextMenuStrip ContextMenuStrip
+        {
+            get { return _contextMenuStrip; }
+        }
+
+        private void Click(object? sender, EventArgs e)
+        {
+            Application.Exit();
+        }
+    }
+
     class Window : NativeWindow, IDisposable
     {
         private static int WM_HOTKEY = 0x0312;
 
-        private HotKeyManager _keyboardHook;
+        private int _lastId = -1;
 
-        public Window(HotKeyManager keyboardHook)
+        private DateTime _lastDateTime = DateTime.Now;
+
+
+        public EventHandler<KeyPressedEventArgs>? HotKeyPressed;
+
+        public Window()
         {
-            _keyboardHook = keyboardHook;
-
-            // create the handle for the window.
             CreateHandle(new CreateParams());
         }
 
-        /// <summary>
-        /// Overridden to get the notifications.
-        /// </summary>
-        /// <param name="m"></param>
         protected override void WndProc(ref Message m)
         {
             base.WndProc(ref m);
@@ -178,12 +228,34 @@ namespace capricemenu
             {
                 // get the keys.
                 int id = (int)m.WParam;
-                Keys key = (Keys)(((int)m.LParam >> 16) & 0xFFFF);
-                ModifierKeys modifier = (ModifierKeys)((int)m.LParam & 0xFFFF);
+                Keys keys = (Keys)(((int)m.LParam >> 16) & 0xFFFF);
+                ModifierKeys modifierKeys = (ModifierKeys)((int)m.LParam & 0xFFFF);
 
-                // invoke the event to notify the parent.
-                _keyboardHook.KeyPressed?.Invoke(this, new KeyPressedEventArgs(id, modifier, key));
+                // invoke the event
+                if (CheckSpan(id))
+                {
+                    HotKeyPressed?.Invoke(this, new KeyPressedEventArgs(id, modifierKeys, keys));
+                }
             }
+        }
+
+        private bool CheckSpan(int id)
+        {
+            bool result = false;
+
+            if ((id == _lastId) && ((DateTime.Now - _lastDateTime).Milliseconds < 400))
+            {
+                result = true;
+                _lastId = -1;
+            }
+            else
+            {
+                _lastId = id;
+            }
+
+            _lastDateTime = DateTime.Now;
+
+            return result;
         }
 
         #region IDisposable Members
@@ -196,43 +268,36 @@ namespace capricemenu
         #endregion
     }
 
+
     public sealed class HotKeyManager : IDisposable
     {
         private Window _window;
 
-        private SortedSet<int> _ids = [];
-
-        /// <summary>
-        /// A hot key has been pressed.
-        /// </summary>
-        public EventHandler<KeyPressedEventArgs>? KeyPressed;
+        private SortedDictionary<int, HotKeyMenu> _hotKeyMenus = [];
 
         public HotKeyManager()
         {
-            _window = new Window(this);
+            _window = new Window();
+            _window.HotKeyPressed += HotKeyPressed;
+
         }
 
-        /// <summary>
-        /// Registers a hot key in the system.
-        /// </summary>
-        /// <param name="modifier">The modifiers that are associated with the hot key.</param>
-        /// <param name="key">The key itself that is associated with the hot key.</param>
-        public void RegisterHotKey(ModifierKeys modifier, Keys key)
+        public void RegisterHotKey(HotKeyMenu hotKeyMenu)
         {
             // An application must specify an id value in the range 0x0000 through 0xBFFF.
             // see https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-registerhotkey
-            int id = -1;
-            for (int i = _ids.LastOrDefault(); i <= 0xbfff; i++)
+            bool registered = false;
+            for (int id = _hotKeyMenus.Keys.LastOrDefault(-1) + 1; id <= 0xbfff; id++)
             {
-                if (!Win32.RegisterHotKey(_window.Handle, i, (uint)modifier, (uint)key))
+                if (Win32.RegisterHotKey(_window.Handle, id, (uint)hotKeyMenu.ModifierKeys, (uint)hotKeyMenu.Keys))
                 {
-                    id = i;
-                    _ids.Add(id);
+                    _hotKeyMenus.Add(id, hotKeyMenu);
+                    registered = true;
                     break;
                 }
             }
 
-            if (id == -1)
+            if (!registered)
             {
                 throw new InvalidOperationException("Couldn't register the hot key.");
             }
@@ -244,34 +309,46 @@ namespace capricemenu
         public void Dispose()
         {
             // unregister all the registered hot keys.
-            foreach (int id in _ids)
+            foreach (int id in _hotKeyMenus.Keys)
             {
                 Win32.UnregisterHotKey(_window.Handle, id);
             }
+
+            _hotKeyMenus.Clear();
 
             // dispose the inner native window.
             _window.Dispose();
         }
 
         #endregion
+
+        private void HotKeyPressed(object? sender, EventArgs eventArgs)
+        {
+            if (sender != null)
+            {
+                KeyPressedEventArgs args = (KeyPressedEventArgs)eventArgs;
+                if (_hotKeyMenus.TryGetValue(args.Id, out HotKeyMenu? hotKeyMenu))
+                {
+                    // MessageBox.Show("HotKeyPressed", "HotKeyPressed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    hotKeyMenu?.ContextMenuStrip.Show(Cursor.Position);
+                }
+            }
+        }
     }
 
-    /// <summary>
-    /// Event Args for the event that is fired after the hot key has been pressed.
-    /// </summary>
     public class KeyPressedEventArgs : EventArgs
     {
         private int _id;
 
-        private ModifierKeys _modifier;
+        private ModifierKeys _modifierKeys;
 
-        private Keys _key;
+        private Keys _keys;
 
-        internal KeyPressedEventArgs(int id, ModifierKeys modifier, Keys key)
+        internal KeyPressedEventArgs(int id, ModifierKeys modifierKeys, Keys keys)
         {
             _id = id;
-            _modifier = modifier;
-            _key = key;
+            _modifierKeys = modifierKeys;
+            _keys = keys;
         }
 
         public int Id
@@ -279,20 +356,18 @@ namespace capricemenu
             get { return _id; }
         }
 
-        public ModifierKeys Modifier
+        public ModifierKeys ModifierKeys
         {
-            get { return _modifier; }
+            get { return _modifierKeys; }
         }
 
-        public Keys Key
+        public Keys Keys
         {
-            get { return _key; }
+            get { return _keys; }
         }
     }
 
-    /// <summary>
-    /// The enumeration of possible modifiers.
-    /// </summary>
+
     [Flags]
     public enum ModifierKeys : uint
     {
