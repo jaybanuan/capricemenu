@@ -59,6 +59,9 @@ namespace capricemenu
 
         [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         public static extern IntPtr GetModuleHandle(string lpModuleName);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        public static extern bool SetForegroundWindow(HandleRef hWnd);
         #endregion
 
         #region Delegate
@@ -154,6 +157,8 @@ namespace capricemenu
 
         private Keys _keys;
 
+        private int _keyPressPeriod;
+
         private ContextMenuStrip _contextMenuStrip;
 
         private ContextMenuStrip CreateContextMenuStrip()
@@ -179,6 +184,7 @@ namespace capricemenu
         {
             _modifierKeys = modifierKeys;
             _keys = keys;
+            _keyPressPeriod = 400;
             _contextMenuStrip = CreateContextMenuStrip();
         }
 
@@ -192,6 +198,11 @@ namespace capricemenu
             get { return _keys; }
         }
 
+        public int KeyPressPeriod
+        {
+            get { return _keyPressPeriod; }
+        }
+
         public ContextMenuStrip ContextMenuStrip
         {
             get { return _contextMenuStrip; }
@@ -203,18 +214,13 @@ namespace capricemenu
         }
     }
 
-    class Window : NativeWindow, IDisposable
+    class DummyWindow : NativeWindow, IDisposable
     {
         private static int WM_HOTKEY = 0x0312;
 
-        private int _lastId = -1;
-
-        private DateTime _lastDateTime = DateTime.Now;
-
-
         public EventHandler<KeyPressedEventArgs>? HotKeyPressed;
 
-        public Window()
+        public DummyWindow()
         {
             CreateHandle(new CreateParams());
         }
@@ -232,30 +238,8 @@ namespace capricemenu
                 ModifierKeys modifierKeys = (ModifierKeys)((int)m.LParam & 0xFFFF);
 
                 // invoke the event
-                if (CheckSpan(id))
-                {
-                    HotKeyPressed?.Invoke(this, new KeyPressedEventArgs(id, modifierKeys, keys));
-                }
+                HotKeyPressed?.Invoke(this, new KeyPressedEventArgs(id, modifierKeys, keys));
             }
-        }
-
-        private bool CheckSpan(int id)
-        {
-            bool result = false;
-
-            if ((id == _lastId) && ((DateTime.Now - _lastDateTime).Milliseconds < 400))
-            {
-                result = true;
-                _lastId = -1;
-            }
-            else
-            {
-                _lastId = id;
-            }
-
-            _lastDateTime = DateTime.Now;
-
-            return result;
         }
 
         #region IDisposable Members
@@ -271,14 +255,18 @@ namespace capricemenu
 
     public sealed class HotKeyManager : IDisposable
     {
-        private Window _window;
+        private DummyWindow _dummyWindow;
 
         private SortedDictionary<int, HotKeyMenu> _hotKeyMenus = [];
 
+        private int _lastId = -1;
+
+        private DateTime _lastDateTime = DateTime.Now;
+
         public HotKeyManager()
         {
-            _window = new Window();
-            _window.HotKeyPressed += HotKeyPressed;
+            _dummyWindow = new DummyWindow();
+            _dummyWindow.HotKeyPressed += HotKeyPressed;
 
         }
 
@@ -289,7 +277,7 @@ namespace capricemenu
             bool registered = false;
             for (int id = _hotKeyMenus.Keys.LastOrDefault(-1) + 1; id <= 0xbfff; id++)
             {
-                if (Win32.RegisterHotKey(_window.Handle, id, (uint)hotKeyMenu.ModifierKeys, (uint)hotKeyMenu.Keys))
+                if (Win32.RegisterHotKey(_dummyWindow.Handle, id, (uint)hotKeyMenu.ModifierKeys, (uint)hotKeyMenu.Keys))
                 {
                     _hotKeyMenus.Add(id, hotKeyMenu);
                     registered = true;
@@ -311,28 +299,50 @@ namespace capricemenu
             // unregister all the registered hot keys.
             foreach (int id in _hotKeyMenus.Keys)
             {
-                Win32.UnregisterHotKey(_window.Handle, id);
+                Win32.UnregisterHotKey(_dummyWindow.Handle, id);
             }
 
             _hotKeyMenus.Clear();
 
             // dispose the inner native window.
-            _window.Dispose();
+            _dummyWindow.Dispose();
         }
 
         #endregion
 
         private void HotKeyPressed(object? sender, EventArgs eventArgs)
         {
-            if (sender != null)
+            if (sender == _dummyWindow)
             {
                 KeyPressedEventArgs args = (KeyPressedEventArgs)eventArgs;
                 if (_hotKeyMenus.TryGetValue(args.Id, out HotKeyMenu? hotKeyMenu))
                 {
-                    // MessageBox.Show("HotKeyPressed", "HotKeyPressed", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    hotKeyMenu?.ContextMenuStrip.Show(Cursor.Position);
+                    if (CheckSpan(args.Id, hotKeyMenu))
+                    {
+                        // MessageBox.Show("HotKeyPressed", "HotKeyPressed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        hotKeyMenu.ContextMenuStrip.Show(Cursor.Position);
+                    }
                 }
             }
+        }
+
+        private bool CheckSpan(int id, HotKeyMenu hotKeyMenu)
+        {
+            bool result = false;
+
+            if ((id == _lastId) && ((DateTime.Now - _lastDateTime).Milliseconds < hotKeyMenu.KeyPressPeriod))
+            {
+                result = true;
+                _lastId = -1;
+            }
+            else
+            {
+                _lastId = id;
+            }
+
+            _lastDateTime = DateTime.Now;
+
+            return result;
         }
     }
 
